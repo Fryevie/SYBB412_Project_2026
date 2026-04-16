@@ -1,0 +1,1038 @@
+---
+title: "Project B for SYBB412"
+author: "Emily Hsu & Shufei Fang"
+date: last-modified
+format: 
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    code-tools: true
+    code-overflow: wrap
+    embed-resources: true
+    date-format: iso
+    theme: pulse
+---
+
+# R package and setup
+
+```{r}
+#| message: false
+#| warning: false
+
+knitr::opts_chunk$set(comment = NA)
+
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(gt)
+library(Seurat)
+library(SingleR)
+library(conflicted)
+library(see)
+library(celldex)
+library(kableExtra)
+
+
+library(tidyverse)
+
+conflicts_prefer(dplyr::select(), dplyr::filter(), base::max(), stats::cor(), base::sum(), stats::quantile
+                 )
+
+theme_set(theme_lucid())
+
+```
+
+We decided to set a seed (123) to ensure the results are reproducible.
+
+```{r}
+
+set.seed(123)
+
+```
+
+# Load in Seurat objects from previous analysis
+
+```{r}
+
+raw <- readRDS("csf_merged_raw_seurat.rds")
+
+qc  <- readRDS("csf_with_qc_metrics.rds")
+
+```
+
+# Quaility Control and Filtering
+
+## QC Metric Assessement
+
+### Violin Plot 
+
+We start by creating a violin plot to see the distribution of our data by diagnosis group
+
+```{r}
+
+VlnPlot(
+  qc,
+  features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+  group.by = "group3",
+  ncol = 3,
+  pt.size = 0
+) &
+  geom_boxplot(width = 0.1, fill = "white", alpha = 0.5)
+
+```
+
+Looking at the three violin plot, we can see that most of the cells falls in a similar ranges of detected genes, total rna counts and mitochondrial percentage.
+
+But we can also see there are some outliers, espically with mitochondrial percentage.
+
+### Scatter Plot 
+
+```{r}
+
+plot1 <- FeatureScatter(qc, feature1 = "nCount_RNA", feature2 = "percent.mt")
+
+plot2 <- FeatureScatter(qc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+```
+
+```{r, fig.width=14, fig.height=14}
+
+plot1 + plot2
+
+```
+
+
+### Setting up filtering parameters
+
+Based on our previous analysis and the violin plot above, we can next choose our qc filter threshold to remove any unwanted cells.
+
+```{r}
+
+CSF_F <- subset(
+  qc,
+  subset =
+    nFeature_RNA >= 300 & #removes likely low-quality droplets
+    nFeature_RNA <= 3500 & #remove unsually complex cells in the upper tials (doublets or multiples)
+    nCount_RNA   >= 500 & #remove cells with weak signals
+    nCount_RNA   <= 15000 & #remove high outliers
+    percent.mt   <= 12 #remove cells with high mt rna, normally stressed or damaged 
+)
+
+```
+
+Than, we set the RNA assay as the default assay for downstream analsyis.
+
+```{r}
+
+DefaultAssay(CSF_F) <- "RNA"
+
+```
+
+```{r}
+
+CSF_F <- JoinLayers(CSF_F, assay = "RNA")
+
+```
+
+## Normalization
+
+```{r}
+
+CSF_F <- NormalizeData(CSF_F)
+
+```
+
+Here we only select the genes that vary the most across the cells in order to help us separate cell population.
+
+```{r}
+
+CSF_F <- FindVariableFeatures(CSF_F, 
+                              selection.method = "vst",
+                              infeatures = 2000)
+
+```
+
+```{r}
+
+top10 <- head(VariableFeatures(CSF_F), 10)
+
+```
+
+```{r}
+
+plot1 <- VariableFeaturePlot(CSF_F)
+
+LabelPoints(plot = plot1, points = top10, repel = TRUE)
+
+```
+
+## Scaling the data
+
+Here we standardize our gene expression before perform PCA analysis.
+
+```{r}
+
+all.genes <- rownames(CSF_F)
+
+CSF_F <- ScaleData(CSF_F, features = all.genes)
+
+```
+
+## Principal Component Analysis
+
+```{r}
+
+CSF_F <- RunPCA(CSF_F, features = VariableFeatures(object = CSF_F))
+
+```
+
+```{r}
+
+print(CSF_F[["pca"]], dims = 1:10, nfeatures = 10)
+
+```
+
+PC1: myeloid vs T cells –\> edit: memory/cytotoxic T cell vs myeloid
+
+PC2: A bit general, no specific immune lineage
+
+PC3: cytotoxic NK/CD8 vs less-cytotoxic T cells
+
+PC4: different myeloid subtypes
+
+PC5: activated/helper-like T cells vs cytotoxic lymphocytes
+
+
+## Determine the dimensionality of the dataset
+
+```{r}
+
+ElbowPlot(CSF_F, ndims = 30)
+
+```
+
+From the eblow plot above, I determine the dimentionnaltiy of the dataset to about 10 in order to capture the major biological structure while limiting the noise.
+
+# Clustering and Visualization
+
+Since we select 10 PCs as our cut off, we will first build a graph for the cells in the first 10 PCs based on their similarity.
+
+```{r}
+
+CSF_F <- FindNeighbors(CSF_F, dims = 1:10)
+
+```
+
+Next, we groups the similar cells into clusters
+
+```{r}
+
+CSF_F <- FindClusters(CSF_F, resolution = 0.4)
+
+```
+
+Finally, we make a visualization of those clusters
+
+```{r}
+
+CSF_F <- RunUMAP(CSF_F, dims = 1:10)
+
+```
+
+```{r}
+
+p1<- DimPlot(CSF_F, reduction = "umap", label = TRUE) +
+  theme(plot.title = element_blank())
+
+```
+
+We can see that our cell can be seperated into several distinct populations. Next, we separate everthing by Healthy vs Diseased, and Healthy vs PDD vs DLB
+
+```{r}
+
+p2<- DimPlot(CSF_F, reduction = "umap", group.by = "group3") +
+  theme(plot.title = element_blank())
+
+```
+
+```{r}
+
+p3<- DimPlot(CSF_F, reduction = "umap", group.by = "group2") +
+  theme(plot.title = element_blank())
+
+```
+
+```{r umap-combined, fig.width=11, fig.height=13}
+
+(p2 | p3) / (p1 | plot_spacer())+
+  plot_annotation(
+    title = "Visualization of Cells by Cluster and Diagnosis",
+    theme = theme(
+      plot.title = element_text(
+        hjust = 0.5,
+        size = 16,
+        face = "bold"))
+    )
+
+```
+
+# Cluster Copostition by Diagnosis Group
+
+Next, we summarized the number and proportion of cells from each diagnosis group within each cluster
+
+```{r}
+
+table(Idents(CSF_F), 
+      CSF_F$group3)
+
+prop.table(table(Idents(CSF_F), 
+                 CSF_F$group3), 
+           margin = 1
+           )
+           
+```
+
+### Clearly Healthy-enriched
+
+These clusters have a noticeably higher Healthy fraction than PDD or DLB:
+
+Cluster 3: 88.2% Healthy
+
+Cluster 5: 69.6% Healthy
+
+Cluster 14: 70.1% Healthy
+
+Cluster 0: 62.6% Healthy
+
+Cluster 2: 59.7% Healthy
+
+Cluster 10: 58.7% Healthy
+
+Cluster 4: 50.6% Healthy
+
+So yes, cluster 3 is especially strong, and 5 and 14 are clearly Healthy-enriched
+
+### Clearly PDD-enriched
+
+These clusters lean more toward PDD:
+
+Cluster 1: 51.2% PDD Cluster 4: 49.4% PDD Cluster 6: 88.9% PDD Cluster 7: 79.3% PDD Cluster 8: 60.6% PDD Cluster 11: 64.9% PDD Cluster 12: 53.6% PDD Cluster 13 64.9%
+
+So one correction to your earlier impression: cluster 13 is actually more PDD-enriched than Healthy-enriched.
+
+### DLB
+
+DLB is low in most clusters, but that is hard to interpret because you only have 2 DLB samples. The only cluster where DLB is really notable is:
+
+Cluster 1: 26.2% DLB
+
+That is worth noticing, but I would be very cautious about making a strong DLB claim yet
+
+## Quantify cluster composition by sample
+
+```{r}
+
+table(Idents(CSF_F), 
+      CSF_F$sample_title)
+
+prop.table(table(Idents(CSF_F),
+                 CSF_F$sample_title), 
+           margin = 1
+           )
+
+```
+
+# Annotation
+
+First we set up to find the marker gene for every clusters
+
+```{r}
+
+markers <- FindAllMarkers(
+  CSF_F,
+  only.pos = TRUE, #Only kept the upregulated gene
+  min.pct = 0.25, #Must be detected in at least 25% of cells
+  logfc.threshold = 0.25
+)
+
+```
+
+Next, we select the 10 strongest marker gene for each cluster
+
+```{r}
+
+top_m <- markers|>
+  group_by(cluster)|>
+  slice_max(order_by = avg_log2FC, n =10) #sort by average log2 fold change
+
+```
+
+```{r}
+
+print(top_m, n = 200)
+
+```
+
+### Using SingleR for cell type annotation
+
+```{r}
+
+sce <- as.SingleCellExperiment(CSF_F)
+
+```
+
+```{r}
+
+library(celldex)
+
+ref <- MonacoImmuneData()
+
+```
+
+```{r}
+
+main <- SingleR(
+  test = sce,
+  ref = ref,
+  labels = ref$label.main
+)
+
+```
+
+```{r}
+
+CSF_F$SingleR_main <- main$labels
+
+CSF_F$SingleR_main_pruned <- main$pruned.labels
+
+```
+
+```{r, fig.width=11, fig.height=13}
+
+DimPlot(CSF_F, group.by = "SingleR_main_pruned", label = TRUE, repel = TRUE)
+
+```
+
+```{r, fig.width=11, fig.height=13}
+
+table(CSF_F$seurat_clusters, CSF_F$SingleR_main_pruned)
+
+prop.table(
+  table(CSF_F$seurat_clusters, CSF_F$SingleR_main_pruned),
+  margin = 1
+)
+
+```
+
+Cluster 0: activated CD4+ T cells, likely effector/activated helper T cells
+
+Cluster 1: activated CD4+ T cells, effector/memory-activated state
+
+Cluster 2: cytotoxic CD8+ T cells, effector/activated CTL state
+
+Cluster 3: memory CD4+ T cells
+
+Cluster 4: activated effector memory CD8+ T cells/NK-like cytotoxic T cells
+
+Cluster 5: myeloid/monocyte-derived dendritic cells
+
+Cluster 6: KLRB1+ memory/effector CD4+ T cells
+
+Cluster 7: macrophages
+
+Cluster 8: NK cells
+
+Cluster 9: inflammatory monocytes
+
+Cluster 10: NK cells
+
+Cluster 11: dendritic cells (cDC2 dendritic cells)
+
+Cluster 12: Mixed
+
+Cluster 13: non-immune
+
+Cluster 14: plasmacytoid dendritic cell (pDC)
+
+Just to make us see it better, we will relabel all the clusters with biological names
+
+```{r}
+
+Idents(CSF_F) <- "seurat_clusters"
+
+p <- DimPlot(
+  CSF_F,
+  reduction = "umap",
+  label = FALSE
+) + theme(legend.position = "right")
+
+cluster_map <- c(
+    "0" = "Act_T",        # 0
+    "1" = "Mem_T",        # 1
+    "2" = "Act_T2",       # 2
+    "3" = "CD8_T",        # 3
+    "4" = "Cyt_NK",       # 4
+    "5" = "KLRB1_T",      # 5
+    "6" = "CD1C_DC",      # 6
+    "7" = "Macro",        # 7
+    "8" = "NK",       # 8
+    "9" = "Mono_inflam",  # 9
+    "10" = "NK2",     # 10
+    "11" = "cDC2_DC2",    # 11
+    "12" = "Mixed",        # 12
+    "13" = "Non-immune",    # 13
+    "14" = "pDC_like"      # 14
+)
+
+centers <- Embeddings(CSF_F, "umap") |>
+  as.data.frame() |>
+  rownames_to_column("cell") |>
+  left_join(
+    CSF_F[[]] |>
+      rownames_to_column("cell") |>
+      select(cell, seurat_clusters),
+    by = "cell"
+  ) |>
+  group_by(seurat_clusters) |>
+  summarise(
+    umap_1 = median(umap_1),
+    umap_2 = median(umap_2),
+    .groups = "drop"
+  ) |>
+  mutate(label = cluster_map[as.character(seurat_clusters)])
+
+```
+
+```{r}
+
+p4 <- p +
+  geom_text(
+    data = centers,
+    aes(x = umap_1, y = umap_2, label = label),
+    inherit.aes = FALSE,
+    size = 3.5
+  )
+
+```
+
+Combine the plot for a presentable visualization
+
+```{r umap-combined, fig.width=11, fig.height=13}
+
+combined_umap <- (p2 | p3) / (p4 | plot_spacer())+
+  plot_annotation(
+    title = "Visualization of Cells by Cluster and Diagnosis",
+    theme = theme(
+      plot.title = element_text(
+        hjust = 0.5,
+        size = 16,
+        face = "bold"))
+    )
+
+```
+
+```{r}
+ggsave(
+  filename = "combined_umap_highres.tiff",
+  plot = combined_umap,
+  width = 10,
+  height = 12,
+  units = "in",
+  dpi = 600,
+  compression = "lzw"
+)
+```
+
+# Save the annotated whole CSF object
+
+```{r}
+
+saveRDS(csf_filtered, "annotated_4_15_26.rds")
+
+```
+
+# Select subset
+
+Cluster 3 is a strong CD8/cytotoxic T-cell cluster: CD8A, CD8B, GZMH, CCL4, and NKG7 are all classic cytotoxic lymphocyte markers
+
+Cluster 4 Clusters 8 and 10 are all cytotoxic lymphoctye program
+
+```{r}
+# 2 options:
+    # Cluster 3,
+```
+
+# Including 3 and 4
+
+```{r}
+
+Idents(CSF_F) <- CSF_F$seurat_clusters
+
+```
+
+```{r}
+
+cd8_c34 <- subset(CSF_F, idents = c("3","4"))
+
+```
+
+## Return to Seurat workflow for Cluster 3&4
+
+```{r}
+
+table(Idents(cd8_c34))
+
+```
+
+Normalization
+
+```{r}
+
+cd8_c34 <- NormalizeData(cd8_c34)
+
+```
+
+```{r}
+
+DefaultAssay(cd8_c34) <- "RNA"
+
+cd8_c34[["RNA"]]$scale.data <- NULL
+
+```
+
+Indentify the most informative gene
+
+```{r}
+
+cd8_c34 <- FindVariableFeatures(cd8_c34, 
+                               selection.method = "vst", 
+                               nfeatures = 2000)
+
+```
+
+Center and standerdize
+
+```{r}
+
+cd8_c34 <- ScaleData(cd8_c34)
+
+```
+
+PCA
+
+```{r}
+
+cd8_c34 <- RunPCA(cd8_c34, npcs = 30)
+
+```
+
+```{r}
+
+ElbowPlot(cd8_c34, ndims = 30)
+
+```
+
+```{r}
+
+cd8_c34 <- FindNeighbors(cd8_c34, dims = 1:10)
+
+```
+
+```{r}
+
+cd8_c34 <- FindClusters(cd8_c34, resolution = 0.3)
+
+```
+
+```{r}
+
+cd8_c34 <- RunUMAP(cd8_c34, dims = 1:8)
+
+```
+
+Visualization
+
+```{r}
+
+DimPlot(cd8_c34, reduction = "umap", label = TRUE)
+
+```
+
+Healthy vs LBD
+
+```{r}
+
+DimPlot(cd8_c34, reduction = "umap", group.by = "group2")
+
+```
+
+`Can see a mostly clear right vs left.` Showing there is a diagnositic difference
+
+Healthy vs DLB vs PDD
+
+```{r}
+
+DimPlot(cd8_c34, reduction = "umap", group.by = "group3")
+
+```
+
+Right side looked mostly health, left side looked mostly PDD. Bottom left has a DLB cluster
+
+```{r}
+table(Idents(cd8_c34), cd8_c34$SingleR_main_pruned)
+
+prop.table(
+  table(Idents(cd8_c34), cd8_c34$SingleR_main_pruned),
+  margin = 1
+)
+```
+
+Since our analysis are CD8+ T cells focused, I will select subcluster 0, 1, 2 for furthur anlysis.
+
+Quantify each group
+
+```{r}
+
+table(Idents(cd8_c34), cd8_c34$group2)
+
+prop.table(table(Idents(cd8_c34), cd8_c34$group2), margin = 1)
+
+```
+
+Subcluster 1 is strongly health associated.
+
+Subcluster 2 is strongly LBD associated
+
+```{r}
+
+table(Idents(cd8_c34), cd8_c34$group3)
+
+prop.table(table(Idents(cd8_c34), cd8_c34$group3), margin = 1)
+
+```
+
+Subcluster 1 is strongly health associated.
+
+Subcluster 2 is strongly diseased with skew toward PDD.
+
+There isn't a DLB dominant group.
+
+# Focuse on subcluster 1 and 2
+
+```{r}
+
+cd8_c34 <- JoinLayers(cd8_c34, assay = "RNA")
+
+```
+
+## Maker indentification
+
+```{r}
+
+cd8_c34m <- FindAllMarkers(
+  cd8_c34,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25
+)
+
+```
+
+```{r}
+
+cd8_c34m_t <- cd8_c34m |>
+  group_by(cluster) |>
+  slice_max(order_by = avg_log2FC, n =10)
+
+```
+
+```{r}
+
+cd8_c34m_t |>
+  dplyr::select(cluster, gene, avg_log2FC, pct.1, pct.2, p_val_adj) |>
+  dplyr::arrange(cluster, dplyr::desc(avg_log2FC)) |>
+  print(n = Inf, width = Inf)
+
+```
+
+### Using SingleR
+
+```{r}
+sce_cd8 <- as.SingleCellExperiment(cd8_c34)
+
+if (!"logcounts" %in% assayNames(sce_cd8)) {
+  sce_cd8 <- logNormCounts(sce_cd8)
+}
+
+ref <- MonacoImmuneData()
+
+pred_main_cd8 <- SingleR(
+  test = sce_cd8,
+  ref = ref,
+  labels = ref$label.main
+)
+
+pred_fine_cd8 <- SingleR(
+  test = sce_cd8,
+  ref = ref,
+  labels = ref$label.fine
+)
+
+cd8_c34$SingleR_main <- pred_main_cd8$labels
+cd8_c34$SingleR_main_pruned <- pred_main_cd8$pruned.labels
+
+cd8_c34$SingleR_fine <- pred_fine_cd8$labels
+cd8_c34$SingleR_fine_pruned <- pred_fine_cd8$pruned.labels
+```
+
+```{r}
+table(Idents(cd8_c34), cd8_c34$SingleR_main_pruned)
+
+prop.table(
+  table(Idents(cd8_c34), cd8_c34$SingleR_main_pruned),
+  margin = 1
+)
+```
+
+The strongest contrast is subcluster 1 and 2
+
+#Continue to Subcluster for 0 & 1 & 2
+
+```{r}
+
+Idents(cd8_c34) <- "seurat_clusters"
+
+```
+
+```{r}
+
+cd8_012<- subset(cd8_c34, idents = c("0", "1", "2"))
+
+```
+
+```{r}
+
+DefaultAssay(cd8_012) <- "RNA"
+
+cd8_012[["RNA"]]$scale.data <- NULL
+
+```
+
+```{r}
+
+cd8_012 <- NormalizeData(cd8_012)
+
+```
+
+```{r}
+
+cd8_012 <- FindVariableFeatures(
+  cd8_012,
+  selection.method = "vst",
+  nfeatures = 2000
+)
+
+```
+
+```{r}
+
+cd8_012 <- ScaleData(cd8_012)
+
+```
+
+```{r}
+
+cd8_012 <- RunPCA(cd8_012, npcs = 30)
+
+```
+
+```{r}
+
+ElbowPlot(cd8_012, ndims = 30)
+
+```
+
+```{r}
+cd8_012 <- FindNeighbors(cd8_012, dims = 1:10)
+cd8_012 <- FindClusters(cd8_012, resolution = 0.2)
+cd8_012 <- RunUMAP(cd8_012, dims = 1:10)
+
+DimPlot(cd8_012, reduction = "umap", label = TRUE)
+DimPlot(cd8_012, reduction = "umap", group.by = "group2")
+DimPlot(cd8_012, reduction = "umap", group.by = "group3")
+```
+
+```{r}
+table(Idents(cd8_012), cd8_012$group2)
+prop.table(table(Idents(cd8_012), cd8_012$group2), margin = 1)
+
+table(Idents(cd8_012), cd8_012$group3)
+prop.table(table(Idents(cd8_012), cd8_012$group3), margin = 1)
+```
+
+```{r}
+
+markers_cd8_012 <- FindAllMarkers(
+  cd8_012,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25
+)
+
+```
+
+```{r}
+markers_cd8_012 |>
+  dplyr::select(cluster, gene, avg_log2FC, pct.1, pct.2, p_val_adj) |>
+  dplyr::arrange(cluster, dplyr::desc(avg_log2FC)) |>
+  dplyr::group_by(cluster) |>
+  dplyr::slice_head(n = 10) |>
+  print(n = Inf, width = Inf)
+```
+
+```{r}
+
+Idents(cd8_012) <- "seurat_clusters"
+
+cd8_final <- subset(cd8_012, idents = c("1", "2"))
+
+```
+
+```{r}
+umap_df <- as.data.frame(Embeddings(cd8_final, "umap"))
+colnames(umap_df) <- c("UMAP_1", "UMAP_2")
+umap_df$cluster <- as.character(Idents(cd8_final))
+
+centers <- umap_df %>%
+  group_by(cluster) %>%
+  summarize(x = median(UMAP_1), y = median(UMAP_2)) %>%
+  mutate(label = case_when(
+    cluster == "1" ~ "Healthy CD8+ T cells",
+    cluster == "2" ~ "Diseased CD8+ T cells",
+    TRUE ~ cluster
+  ))
+
+```
+
+
+```{r}
+p6 <- DimPlot(cd8_final, reduction = "umap", label = FALSE) +
+  theme(plot.title = element_blank()) +
+  geom_text(data = centers,
+            aes(x = x, y = y, label = label),
+            size = 3, color = "black",
+            inherit.aes = FALSE) +
+  expand_limits(x = c(min(umap_df$UMAP_1) - 2, max(umap_df$UMAP_1) + 2))
+
+p7<- DimPlot(cd8_final, reduction = "umap", group.by = "group2")+
+  theme(plot.title = element_blank())
+
+p8<- DimPlot(cd8_final, reduction = "umap", group.by = "group3")+
+  theme(plot.title = element_blank())
+
+table(Idents(cd8_final), cd8_final$group2)
+prop.table(table(Idents(cd8_final), cd8_final$group2), margin = 1)
+
+table(Idents(cd8_final), cd8_final$group3)
+prop.table(table(Idents(cd8_final), cd8_final$group3), margin = 1)
+```
+
+```{r umap-combined, fig.width=11, fig.height=13}
+
+final_plot <-(p8 | p7) / (p6 | plot_spacer()) +
+  plot_annotation(
+    title = "Visualization of CD8+ T Cells by Cluster and Diagnosis",
+    theme = theme(
+      plot.title = element_text(
+        hjust = 0.5,
+        size = 16,
+        face = "bold"
+      )
+    )
+  )
+
+```
+
+```{r, fig.width=11, fig.height=13}
+final_plot
+```
+
+```{r}
+ggsave("cd8_final.png", plot = final_plot, width = 12, height = 8, dpi = 300)
+
+ggsave("cd8_final.tiff", plot = final_plot,
+       width = 12, height = 8, dpi = 300, compression = "lzw")
+```
+
+##Fiinal Maker Anlysis
+
+```{r}
+
+markers_cd8_final <- FindAllMarkers(
+  cd8_final,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25
+)
+
+```
+
+```{r}
+
+top_markers <- FindAllMarkers(cd8_final, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) |>
+  mutate(cluster = as.character(cluster)) |>
+  group_by(cluster) |>
+  slice_max(avg_log2FC, n = 5) |>
+  summarise(Markers = paste(gene, collapse = "<br>"), .groups = "drop")
+
+```
+
+```{r}
+
+diag_counts <- tibble(
+  cluster = as.character(Idents(cd8_final)),
+  group2  = as.character(cd8_final$group2)
+) |>
+  dplyr::count(cluster, group2) |>
+  group_by(cluster) |>
+  mutate(value = sprintf("%d (%.1f%%)", n, 100 * n / sum(n))) |>
+  ungroup() |>
+  pivot_wider(id_cols = cluster, names_from = group2, values_from = value, values_fill = "0 (0.0%)")
+
+```
+
+#### Final table
+
+```{r}
+final_tbl <- final_tbl %>%
+  mutate(State = case_when(
+    Cluster == "1" ~ "Healthy CD8+ T cells",
+    Cluster == "2" ~ "Diseased CD8+ T cells"
+  )) %>%
+  select(Cluster, State, Markers, Healthy, LBD) %>%
+  mutate(Markers = sapply(Markers, function(x) paste(x, collapse = ", ")))
+
+```
+
+```{r}
+final_tbl %>%
+  kbl(escape = FALSE, 
+      caption = "<div style='text-align:center; font-size:20px; font-weight:bold; color:black;'>CD8 Subcluster Marker Summary</div>",
+      align = c("c", "l", "l", "c", "c")) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    position = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = "#e8e8e8")
+```
+
+
+# Session Info
+
+```{r}
+
+sessionInfo()
+
+```
